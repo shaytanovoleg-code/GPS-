@@ -2,7 +2,7 @@
 <html lang="uk">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -11,15 +11,24 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body {
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+    }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: linear-gradient(160deg, #0f172a 0%, #1e293b 100%);
       color: #e2e8f0;
       min-height: 100vh;
+      min-height: 100dvh;
       display: flex;
       justify-content: center;
       padding: 16px;
+      padding-top: max(16px, env(safe-area-inset-top));
       padding-bottom: max(16px, env(safe-area-inset-bottom));
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
     }
 
     .app {
@@ -28,6 +37,8 @@
       display: flex;
       flex-direction: column;
       gap: 20px;
+      position: relative;
+      z-index: 1;
     }
 
     header h1 {
@@ -48,6 +59,8 @@
       color: #fff;
       font-size: 16px;
       outline: none;
+      -webkit-appearance: none;
+      appearance: none;
     }
     .user-box input:focus { border-color: #38bdf8; }
     .user-box input:disabled { opacity: 0.5; }
@@ -81,17 +94,28 @@
       text-align: center;
       font-size: 13px;
       color: #94a3b8;
-      padding: 6px;
+      padding: 8px 12px;
       border-radius: 8px;
       background: rgba(148, 163, 184, 0.1);
+      line-height: 1.4;
+      min-height: 34px;
     }
     .gps-status.ok    { color: #22c55e; background: rgba(34, 197, 94, 0.1); }
     .gps-status.error { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+    .gps-status.warn  { color: #f59e0b; background: rgba(245, 158, 11, 0.1); }
 
-    .buttons { display: flex; flex-direction: column; gap: 12px; }
+    .buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+      z-index: 10;
+    }
 
     .btn {
-      padding: 18px;
+      position: relative;
+      z-index: 10;
+      padding: 20px;
       border: none;
       border-radius: 14px;
       font-size: 18px;
@@ -99,6 +123,12 @@
       color: #fff;
       cursor: pointer;
       transition: transform .1s, opacity .2s;
+      -webkit-appearance: none;
+      appearance: none;
+      touch-action: manipulation;
+      -webkit-user-select: none;
+      user-select: none;
+      width: 100%;
     }
     .btn:active { transform: scale(0.98); }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -115,6 +145,8 @@
       line-height: 1.6;
       white-space: pre-wrap;
       color: #cbd5e1;
+      -webkit-user-select: text;
+      user-select: text;
     }
     .hidden { display: none; }
 
@@ -127,7 +159,8 @@
       <h1>🏃 GPS Крос</h1>
       <div class="user-box">
         <label for="surname">Прізвище:</label>
-        <input id="surname" type="text" placeholder="Введіть прізвище" autocomplete="off" />
+        <input id="surname" type="text" placeholder="Введіть прізвище"
+               autocomplete="off" autocorrect="off" autocapitalize="words" />
       </div>
     </header>
 
@@ -142,8 +175,8 @@
       <div class="gps-status" id="gpsStatus">📍 GPS: очікування</div>
 
       <div class="buttons">
-        <button id="startBtn" class="btn btn-start">▶ Почати</button>
-        <button id="stopBtn" class="btn btn-stop" disabled>■ Закінчити</button>
+        <button id="startBtn" class="btn btn-start" type="button">▶ Почати</button>
+        <button id="stopBtn" class="btn btn-stop" type="button" disabled>■ Закінчити</button>
       </div>
 
       <div id="result" class="result hidden"></div>
@@ -156,8 +189,10 @@
 
   <script>
     // ============================================================
-    //  GPS Крос — логіка додатку
+    //  GPS Крос — логіка додатку (виправлено для iOS Safari)
     // ============================================================
+
+    const DEBUG = true; // ← поставте false після тестування
 
     const timerEl      = document.getElementById("timer");
     const distEl       = document.getElementById("dist");
@@ -170,10 +205,19 @@
 
     let startTime     = null;
     let watchId       = null;
-    let totalDistance = 0;      // метри
+    let totalDistance = 0;
     let lastPosition  = null;
     let intervalId    = null;
     let running       = false;
+    let gpsReady      = false;
+
+    // ---------- Логування ----------
+    function log(...args) {
+      if (DEBUG) console.log("[GPS Крос]", ...args);
+    }
+    function showAlert(msg) {
+      if (DEBUG) alert(msg);
+    }
 
     // ---------- Відновлення прізвища ----------
     surnameInput.value = localStorage.getItem("kros_surname") || "";
@@ -208,20 +252,56 @@
       gpsStatusEl.className = "gps-status" + (type ? " " + type : "");
     }
 
-    // ---------- Геолокація ----------
+    // ---------- Отримати помилку у текст ----------
+    function geoErrorMessage(err) {
+      const map = {
+        1: "доступ заборонено — увімкніть геолокацію в Налаштуваннях",
+        2: "місцезнаходження недоступне",
+        3: "таймаут — спробуйте ще раз"
+      };
+      return map[err.code] || "невідома помилка";
+    }
+
+    // ============================================================
+    //  КЛЮЧОВЕ: явний запит дозволу ПЕРЕД стартом
+    // ============================================================
+    function requestPermission() {
+      return new Promise((resolve) => {
+        if (!navigator.geolocation) {
+          setGpsStatus("📍 GPS: не підтримується цим браузером", "error");
+          resolve(false);
+          return;
+        }
+
+        setGpsStatus("📍 GPS: запит дозволу…", "warn");
+
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const acc = Math.round(pos.coords.accuracy);
+            setGpsStatus(`📍 GPS: дозвіл надано (±${acc} м)`, "ok");
+            gpsReady = true;
+            resolve(true);
+          },
+          (err) => {
+            setGpsStatus(`📍 GPS: ${geoErrorMessage(err)}`, "error");
+            log("Помилка дозволу:", err);
+            resolve(false);
+          },
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+      });
+    }
+
+    // ---------- Старт відслідковування ----------
     function startGeolocation() {
-      if (!navigator.geolocation) {
-        setGpsStatus("📍 GPS: не підтримується", "error");
-        return;
-      }
-      setGpsStatus("📍 GPS: пошук сигналу…");
+      setGpsStatus("📍 GPS: відслідковування…", "warn");
 
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
 
-          if (accuracy > 50) {
-            setGpsStatus(`📍 GPS: слабкий сигнал (±${Math.round(accuracy)} м)`, "error");
+          if (accuracy > 100) {
+            setGpsStatus(`📍 GPS: слабкий сигнал (±${Math.round(accuracy)} м)`, "warn");
             return;
           }
 
@@ -232,7 +312,8 @@
             const dt = (Date.now() - lastPosition.time) / 1000;
             const speed = dt > 0 ? (d / dt) * 3.6 : 0;
 
-            if (d > 1 && speed < 30) {
+            // фільтр стрибків + мінімальний рух 2 м
+            if (d >= 2 && speed < 30) {
               totalDistance += d;
             }
           }
@@ -240,8 +321,8 @@
           updateUI();
         },
         (err) => {
-          const map = { 1: "доступ заборонено", 2: "недоступний", 3: "таймаут" };
-          setGpsStatus(`📍 GPS: ${map[err.code] || "помилка"}`, "error");
+          log("watchPosition помилка:", err);
+          setGpsStatus(`📍 GPS: ${geoErrorMessage(err)}`, "error");
         },
         { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
       );
@@ -253,6 +334,7 @@
         watchId = null;
       }
       lastPosition = null;
+      gpsReady = false;
     }
 
     // ---------- UI ----------
@@ -270,8 +352,12 @@
       }
     }
 
-    // ---------- СТАРТ ----------
-    startBtn.addEventListener("click", () => {
+    // ============================================================
+    //  СТАРТ (з діагностикою)
+    // ============================================================
+    startBtn.addEventListener("click", async () => {
+      showAlert("Кнопку натиснуто ✅");
+
       const surname = surnameInput.value.trim();
       if (!surname) {
         alert("Введіть прізвище перед початком");
@@ -280,12 +366,32 @@
       }
       localStorage.setItem("kros_surname", surname);
 
+      // Блокуємо кнопки на час запиту
+      startBtn.disabled = true;
+      startBtn.textContent = "⏳ Отримуємо GPS…";
+
+      const ok = await requestPermission();
+
+      if (!ok) {
+        startBtn.disabled = false;
+        startBtn.textContent = "▶ Почати";
+        alert(
+          "Не вдалося отримати доступ до геолокації.\n\n" +
+          "На iPhone:\n" +
+          "1. Налаштування → Конфіденційність → Служби геолокації → Safari → Дозволити\n" +
+          "2. У Safari натисніть ᴀA біля адреси → Налаштування веб-сайту → Місцезнаходження → Дозволити\n" +
+          "3. Оновіть сторінку"
+        );
+        return;
+      }
+
+      // Дозвіл отримано — стартуємо
       startTime = Date.now();
       totalDistance = 0;
       lastPosition = null;
       running = true;
 
-      startBtn.disabled = true;
+      startBtn.textContent = "▶ Почати";
       stopBtn.disabled = false;
       surnameInput.disabled = true;
       resultEl.classList.add("hidden");
@@ -323,7 +429,6 @@
         avgSpeedKmh: +avgSpeed.toFixed(2)
       };
 
-      // Зберігаємо в історію
       const history = JSON.parse(localStorage.getItem("kros_history") || "[]");
       history.push(record);
       localStorage.setItem("kros_history", JSON.stringify(history));
@@ -343,6 +448,15 @@
       startBtn.disabled = false;
       stopBtn.disabled = true;
       surnameInput.disabled = false;
+
+      setGpsStatus("📍 GPS: зупинено");
+    });
+
+    // ---------- Перевірка при завантаженні ----------
+    window.addEventListener("load", () => {
+      if (!window.isSecureContext) {
+        setGpsStatus("📍 GPS: потрібен HTTPS або localhost", "error");
+      }
     });
   </script>
 </body>
