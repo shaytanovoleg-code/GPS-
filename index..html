@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>GPS Крос</title>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(160deg, #0f172a 0%, #1e293b 100%);
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 16px;
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+    }
+
+    .app {
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    header h1 {
+      text-align: center;
+      font-size: 28px;
+      margin-bottom: 12px;
+      color: #38bdf8;
+    }
+
+    .user-box { display: flex; flex-direction: column; gap: 6px; }
+    .user-box label { font-size: 14px; color: #94a3b8; }
+
+    .user-box input {
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #fff;
+      font-size: 16px;
+      outline: none;
+    }
+    .user-box input:focus { border-color: #38bdf8; }
+    .user-box input:disabled { opacity: 0.5; }
+
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      justify-content: center;
+    }
+
+    .timer {
+      font-size: 56px;
+      font-weight: 700;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      color: #f8fafc;
+      letter-spacing: 2px;
+    }
+
+    .stats {
+      display: flex;
+      justify-content: space-around;
+      font-size: 18px;
+      color: #94a3b8;
+    }
+    .stats span { color: #38bdf8; font-weight: 700; }
+
+    .gps-status {
+      text-align: center;
+      font-size: 13px;
+      color: #94a3b8;
+      padding: 6px;
+      border-radius: 8px;
+      background: rgba(148, 163, 184, 0.1);
+    }
+    .gps-status.ok    { color: #22c55e; background: rgba(34, 197, 94, 0.1); }
+    .gps-status.error { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+
+    .buttons { display: flex; flex-direction: column; gap: 12px; }
+
+    .btn {
+      padding: 18px;
+      border: none;
+      border-radius: 14px;
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+      cursor: pointer;
+      transition: transform .1s, opacity .2s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-start { background: #22c55e; }
+    .btn-stop  { background: #ef4444; }
+
+    .result {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      color: #cbd5e1;
+    }
+    .hidden { display: none; }
+
+    footer { text-align: center; color: #64748b; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>🏃 GPS Крос</h1>
+      <div class="user-box">
+        <label for="surname">Прізвище:</label>
+        <input id="surname" type="text" placeholder="Введіть прізвище" autocomplete="off" />
+      </div>
+    </header>
+
+    <main>
+      <div class="timer" id="timer">00:00:00</div>
+
+      <div class="stats">
+        <div><span id="dist">0.00</span> км</div>
+        <div><span id="speed">0.0</span> км/год</div>
+      </div>
+
+      <div class="gps-status" id="gpsStatus">📍 GPS: очікування</div>
+
+      <div class="buttons">
+        <button id="startBtn" class="btn btn-start">▶ Почати</button>
+        <button id="stopBtn" class="btn btn-stop" disabled>■ Закінчити</button>
+      </div>
+
+      <div id="result" class="result hidden"></div>
+    </main>
+
+    <footer>
+      <small>Результат зберігається на пристрої</small>
+    </footer>
+  </div>
+
+  <script>
+    // ============================================================
+    //  GPS Крос — логіка додатку
+    // ============================================================
+
+    const timerEl      = document.getElementById("timer");
+    const distEl       = document.getElementById("dist");
+    const speedEl      = document.getElementById("speed");
+    const gpsStatusEl  = document.getElementById("gpsStatus");
+    const startBtn     = document.getElementById("startBtn");
+    const stopBtn      = document.getElementById("stopBtn");
+    const resultEl     = document.getElementById("result");
+    const surnameInput = document.getElementById("surname");
+
+    let startTime     = null;
+    let watchId       = null;
+    let totalDistance = 0;      // метри
+    let lastPosition  = null;
+    let intervalId    = null;
+    let running       = false;
+
+    // ---------- Відновлення прізвища ----------
+    surnameInput.value = localStorage.getItem("kros_surname") || "";
+    surnameInput.addEventListener("change", () => {
+      localStorage.setItem("kros_surname", surnameInput.value.trim());
+    });
+
+    // ---------- Форматування часу ----------
+    function formatTime(ms) {
+      const totalSec = Math.floor(ms / 1000);
+      const h = String(Math.floor(totalSec / 3600)).padStart(2, "0");
+      const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+      const s = String(totalSec % 60).padStart(2, "0");
+      return `${h}:${m}:${s}`;
+    }
+
+    // ---------- Haversine ----------
+    function haversine(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toRad = d => (d * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    // ---------- GPS статус ----------
+    function setGpsStatus(text, type = "") {
+      gpsStatusEl.textContent = text;
+      gpsStatusEl.className = "gps-status" + (type ? " " + type : "");
+    }
+
+    // ---------- Геолокація ----------
+    function startGeolocation() {
+      if (!navigator.geolocation) {
+        setGpsStatus("📍 GPS: не підтримується", "error");
+        return;
+      }
+      setGpsStatus("📍 GPS: пошук сигналу…");
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const { latitude, longitude, accuracy } = pos.coords;
+
+          if (accuracy > 50) {
+            setGpsStatus(`📍 GPS: слабкий сигнал (±${Math.round(accuracy)} м)`, "error");
+            return;
+          }
+
+          setGpsStatus(`📍 GPS: OK (±${Math.round(accuracy)} м)`, "ok");
+
+          if (lastPosition) {
+            const d = haversine(lastPosition.lat, lastPosition.lon, latitude, longitude);
+            const dt = (Date.now() - lastPosition.time) / 1000;
+            const speed = dt > 0 ? (d / dt) * 3.6 : 0;
+
+            if (d > 1 && speed < 30) {
+              totalDistance += d;
+            }
+          }
+          lastPosition = { lat: latitude, lon: longitude, time: Date.now() };
+          updateUI();
+        },
+        (err) => {
+          const map = { 1: "доступ заборонено", 2: "недоступний", 3: "таймаут" };
+          setGpsStatus(`📍 GPS: ${map[err.code] || "помилка"}`, "error");
+        },
+        { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+      );
+    }
+
+    function stopGeolocation() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      lastPosition = null;
+    }
+
+    // ---------- UI ----------
+    function updateUI() {
+      if (running && startTime) {
+        timerEl.textContent = formatTime(Date.now() - startTime);
+      }
+      const km = totalDistance / 1000;
+      distEl.textContent = km.toFixed(2);
+
+      if (running && startTime) {
+        const hours = (Date.now() - startTime) / 3600000;
+        const avgSpeed = hours > 0 ? km / hours : 0;
+        speedEl.textContent = avgSpeed.toFixed(1);
+      }
+    }
+
+    // ---------- СТАРТ ----------
+    startBtn.addEventListener("click", () => {
+      const surname = surnameInput.value.trim();
+      if (!surname) {
+        alert("Введіть прізвище перед початком");
+        surnameInput.focus();
+        return;
+      }
+      localStorage.setItem("kros_surname", surname);
+
+      startTime = Date.now();
+      totalDistance = 0;
+      lastPosition = null;
+      running = true;
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      surnameInput.disabled = true;
+      resultEl.classList.add("hidden");
+      timerEl.textContent = "00:00:00";
+      speedEl.textContent = "0.0";
+
+      startGeolocation();
+      intervalId = setInterval(updateUI, 1000);
+      updateUI();
+    });
+
+    // ---------- СТОП ----------
+    stopBtn.addEventListener("click", () => {
+      if (!running) return;
+      running = false;
+      clearInterval(intervalId);
+      stopGeolocation();
+
+      const endTime = Date.now();
+      const durationMs = endTime - startTime;
+      const km = totalDistance / 1000;
+      const avgSpeed = durationMs > 0 ? km / (durationMs / 3600000) : 0;
+
+      const surname = surnameInput.value.trim();
+      const startStr = new Date(startTime).toLocaleString("uk-UA");
+      const endStr   = new Date(endTime).toLocaleString("uk-UA");
+
+      const record = {
+        surname,
+        startTime: new Date(startTime).toISOString(),
+        endTime: new Date(endTime).toISOString(),
+        durationSec: Math.floor(durationMs / 1000),
+        durationFormatted: formatTime(durationMs),
+        distanceKm: +km.toFixed(3),
+        avgSpeedKmh: +avgSpeed.toFixed(2)
+      };
+
+      // Зберігаємо в історію
+      const history = JSON.parse(localStorage.getItem("kros_history") || "[]");
+      history.push(record);
+      localStorage.setItem("kros_history", JSON.stringify(history));
+
+      resultEl.textContent =
+        `🏁 Забіг завершено\n` +
+        `👤 Прізвище: ${surname}\n` +
+        `🕒 Початок: ${startStr}\n` +
+        `🕒 Закінчення: ${endStr}\n` +
+        `⏱ Час: ${formatTime(durationMs)}\n` +
+        `📏 Дистанція: ${km.toFixed(2)} км\n` +
+        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год\n\n` +
+        `📋 Скопіюйте результат і надішліть адміністратору.`;
+
+      resultEl.classList.remove("hidden");
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      surnameInput.disabled = false;
+    });
+  </script>
+</body>
+</html>
