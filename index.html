@@ -8,7 +8,6 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>GPS Крос</title>
 
-  <!-- ⚠️ ОБОВ'ЯЗКОВО: Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <style>
@@ -193,10 +192,10 @@
 
   <script>
     // ============================================================
-    //  GPS Крос — логіка (з інтеграцією Telegram WebApp)
+    //  GPS Крос — постійний трекінг
     // ============================================================
 
-    const DEBUG = false;
+    const DEBUG = true; // ← для діагностики, потім false
 
     const timerEl      = document.getElementById("timer");
     const distEl       = document.getElementById("dist");
@@ -208,12 +207,13 @@
     const surnameInput = document.getElementById("surname");
     const footerText   = document.getElementById("footerText");
 
-    let startTime     = null;
-    let watchId       = null;
-    let totalDistance = 0;
-    let lastPosition  = null;
-    let intervalId    = null;
-    let running       = false;
+    let startTime      = null;
+    let watchId        = null;
+    let totalDistance  = 0;       // метри
+    let lastPosition   = null;    // { lat, lon, time, accuracy }
+    let allPoints      = [];      // усі прийняті точки
+    let intervalId     = null;
+    let running        = false;
 
     // ------------------------------------------------------------
     //  TELEGRAM WEBAPP
@@ -231,7 +231,6 @@
       }
     }
 
-    // Автозаповнення імені з Telegram
     if (isTelegram && tg.initDataUnsafe.user) {
       const u = tg.initDataUnsafe.user;
       const autoName = [u.last_name, u.first_name].filter(Boolean).join(" ").trim();
@@ -242,7 +241,6 @@
       }
       footerText.textContent = "Результат автоматично надсилається тренеру";
     } else {
-      // Не з Telegram — звичайний режим
       surnameInput.value = localStorage.getItem("kros_surname") || "";
     }
 
@@ -289,6 +287,41 @@
     }
 
     // ------------------------------------------------------------
+    //  ДОДАТИ ТОЧКУ ДО ТРЕКУ
+    // ------------------------------------------------------------
+    // Ключова логіка:
+    //  - Кожна нова GPS-точка перевіряється
+    //  - Якщо вона "правдоподібна" (рух ≤ 30 км/год) — додаємо відстань
+    //  - Якщо "стрибок" — ІГНОРУЄМО, але оновлюємо lastPosition на нову (щоб не тягнути застарілу)
+    function addPoint(latitude, longitude, accuracy) {
+      const now = Date.now();
+
+      if (!lastPosition) {
+        lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
+        allPoints.push({ lat: latitude, lon: longitude, time: now });
+        return 0;
+      }
+
+      const d = haversine(lastPosition.lat, lastPosition.lon, latitude, longitude);
+      const dt = (now - lastPosition.time) / 1000;       // секунди
+      const speed = dt > 0 ? (d / dt) * 3.6 : 0;         // км/год
+
+      // Фільтр "стрибків": якщо швидкість > 30 км/год — це GPS-шум або зміна вишки
+      // НЕ додаємо відстань, але оновлюємо lastPosition, щоб наступна точка
+      // рахувалась від нового місця
+      if (d > 0 && speed <= 30) {
+        totalDistance += d;
+        allPoints.push({ lat: latitude, lon: longitude, time: now });
+        lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
+        return d;
+      }
+
+      // Стрибок — оновлюємо lastPosition, дистанцію НЕ додаємо
+      lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
+      return 0;
+    }
+
+    // ------------------------------------------------------------
     //  GPS
     // ------------------------------------------------------------
     function requestPermission() {
@@ -315,28 +348,47 @@
 
     function startGeolocation() {
       setGpsStatus("📍 GPS: відслідковування…", "warn");
+
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
-          if (accuracy > 100) {
-            setGpsStatus(`📍 GPS: слабкий сигнал (±${Math.round(accuracy)} м)`, "warn");
-            return;
-          }
-          setGpsStatus(`📍 GPS: OK (±${Math.round(accuracy)} м)`, "ok");
 
-          if (lastPosition) {
-            const d = haversine(lastPosition.lat, lastPosition.lon, latitude, longitude);
-            const dt = (Date.now() - lastPosition.time) / 1000;
-            const speed = dt > 0 ? (d / dt) * 3.6 : 0;
-            if (d >= 2 && speed < 30) {
-              totalDistance += d;
-            }
+          // Рахуємо дистанцію ЗАВЖДИ (навіть при поганій точності),
+          // але показуємо точність користувачу
+          const added = addPoint(latitude, longitude, accuracy);
+
+          if (accuracy > 100) {
+            setGpsStatus(
+              `📍 GPS: слабкий сигнал (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`,
+              "warn"
+            );
+          } else if (accuracy > 50) {
+            setGpsStatus(
+              `📍 GPS: середній сигнал (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`,
+              "warn"
+            );
+          } else {
+            setGpsStatus(
+              `📍 GPS: OK (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`,
+              "ok"
+            );
           }
-          lastPosition = { lat: latitude, lon: longitude, time: Date.now() };
+
+          if (DEBUG && added > 0) {
+            console.log(`[GPS] +${added.toFixed(1)} м, всього ${(totalDistance/1000).toFixed(3)} км`);
+          }
+
           updateUI();
         },
-        (err) => setGpsStatus(`📍 GPS: ${geoErrorMessage(err)}`, "error"),
-        { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+        (err) => {
+          console.warn("[GPS] watchPosition error:", err);
+          setGpsStatus(`📍 GPS: ${geoErrorMessage(err)}`, "error");
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 0,      // ← завжди свіжі дані
+          timeout: 20000,
+        }
       );
     }
 
@@ -389,10 +441,11 @@
         return;
       }
 
-      startTime = Date.now();
+      startTime     = Date.now();
       totalDistance = 0;
-      lastPosition = null;
-      running = true;
+      lastPosition  = null;
+      allPoints     = [];
+      running       = true;
 
       startBtn.textContent = "▶ Почати";
       stopBtn.disabled = false;
@@ -400,6 +453,7 @@
       resultEl.classList.add("hidden");
       timerEl.textContent = "00:00:00";
       speedEl.textContent = "0.0";
+      distEl.textContent  = "0.00";
 
       startGeolocation();
       intervalId = setInterval(updateUI, 1000);
@@ -407,7 +461,7 @@
     });
 
     // ------------------------------------------------------------
-    //  ЗАКІНЧИТИ → показати + відправити боту
+    //  ЗАКІНЧИТИ
     // ------------------------------------------------------------
     stopBtn.addEventListener("click", () => {
       if (!running) return;
@@ -415,23 +469,22 @@
       clearInterval(intervalId);
       stopGeolocation();
 
-      const endTime = Date.now();
+      const endTime    = Date.now();
       const durationMs = endTime - startTime;
-      const km = totalDistance / 1000;
-      const avgSpeed = durationMs > 0 ? km / (durationMs / 3600000) : 0;
+      const km         = totalDistance / 1000;
+      const avgSpeed   = durationMs > 0 ? km / (durationMs / 3600000) : 0;
 
-      const surname = surnameInput.value.trim();
+      const surname   = surnameInput.value.trim();
       const startDate = new Date(startTime);
-      const endDate = new Date(endTime);
+      const endDate   = new Date(endTime);
 
       const dd = String(startDate.getDate()).padStart(2, "0");
       const mm = String(startDate.getMonth() + 1).padStart(2, "0");
       const dateStr = `${dd}.${mm}`;
       const startHHmm = `${String(startDate.getHours()).padStart(2, "0")}:${String(startDate.getMinutes()).padStart(2, "0")}`;
-      const endHHmm = `${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}`;
+      const endHHmm   = `${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}`;
       const durationFormatted = formatTime(durationMs);
 
-      // Показуємо результат на екрані
       resultEl.textContent =
         `🏁 Тренування завершено\n` +
         `👤 ${surname}\n` +
@@ -440,11 +493,11 @@
         `🕐 Закінчення: ${endHHmm}\n` +
         `⏱ Час тренування: ${durationFormatted}\n` +
         `📏 Дистанція: ${km.toFixed(2)} км\n` +
-        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год\n\n` +
+        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год\n` +
+        `📍 GPS-точок: ${allPoints.length}\n\n` +
         `✅ Дані надіслано тренеру.`;
       resultEl.classList.remove("hidden");
 
-      // Пакет даних для бота
       const payload = {
         action: "kros_result",
         surname,
@@ -456,27 +509,24 @@
         distanceKm: +km.toFixed(3),
         avgSpeedKmh: +avgSpeed.toFixed(2),
         startISO: startDate.toISOString(),
-        endISO: endDate.toISOString()
+        endISO: endDate.toISOString(),
+        pointsCount: allPoints.length,
       };
 
-      // Зберігаємо локально (резерв)
       try {
         const history = JSON.parse(localStorage.getItem("kros_history") || "[]");
         history.push(payload);
         localStorage.setItem("kros_history", JSON.stringify(history.slice(-50)));
       } catch (e) {}
 
-      // ВІДПРАВКА БОТУ
       if (isTelegram && tg.sendData) {
         try {
           tg.sendData(JSON.stringify(payload));
-          // Telegram сам закриє WebApp після sendData
         } catch (e) {
           console.error("sendData error:", e);
           alert("Не вдалося надіслати дані тренеру. Спробуйте ще раз.");
         }
       } else {
-        // Не з Telegram — просто показуємо
         resultEl.textContent += "\n\n⚠️ Відкрийте через Telegram-бота, щоб надіслати тренеру.";
       }
 
