@@ -8,6 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>GPS Крос</title>
 
+  <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <style>
@@ -192,10 +193,10 @@
 
   <script>
     // ============================================================
-    //  GPS Крос — постійний трекінг
+    //  GPS Крос — логіка з інтеграцією Telegram WebApp
     // ============================================================
 
-    const DEBUG = true; // ← для діагностики, потім false
+    const DEBUG = true;
 
     const timerEl      = document.getElementById("timer");
     const distEl       = document.getElementById("dist");
@@ -207,13 +208,13 @@
     const surnameInput = document.getElementById("surname");
     const footerText   = document.getElementById("footerText");
 
-    let startTime      = null;
-    let watchId        = null;
-    let totalDistance  = 0;       // метри
-    let lastPosition   = null;    // { lat, lon, time, accuracy }
-    let allPoints      = [];      // усі прийняті точки
-    let intervalId     = null;
-    let running        = false;
+    let startTime     = null;
+    let watchId       = null;
+    let totalDistance = 0;
+    let lastPosition  = null;
+    let intervalId    = null;
+    let running       = false;
+    let allPoints     = [];
 
     // ------------------------------------------------------------
     //  TELEGRAM WEBAPP
@@ -231,6 +232,7 @@
       }
     }
 
+    // Автозаповнення імені з Telegram
     if (isTelegram && tg.initDataUnsafe.user) {
       const u = tg.initDataUnsafe.user;
       const autoName = [u.last_name, u.first_name].filter(Boolean).join(" ").trim();
@@ -289,34 +291,28 @@
     // ------------------------------------------------------------
     //  ДОДАТИ ТОЧКУ ДО ТРЕКУ
     // ------------------------------------------------------------
-    // Ключова логіка:
-    //  - Кожна нова GPS-точка перевіряється
-    //  - Якщо вона "правдоподібна" (рух ≤ 30 км/год) — додаємо відстань
-    //  - Якщо "стрибок" — ІГНОРУЄМО, але оновлюємо lastPosition на нову (щоб не тягнути застарілу)
     function addPoint(latitude, longitude, accuracy) {
       const now = Date.now();
 
       if (!lastPosition) {
         lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
-        allPoints.push({ lat: latitude, lon: longitude, time: now });
+        allPoints.push({ lat: latitude, lon: longitude });
         return 0;
       }
 
       const d = haversine(lastPosition.lat, lastPosition.lon, latitude, longitude);
-      const dt = (now - lastPosition.time) / 1000;       // секунди
-      const speed = dt > 0 ? (d / dt) * 3.6 : 0;         // км/год
+      const dt = (now - lastPosition.time) / 1000;
+      const speed = dt > 0 ? (d / dt) * 3.6 : 0;
 
-      // Фільтр "стрибків": якщо швидкість > 30 км/год — це GPS-шум або зміна вишки
-      // НЕ додаємо відстань, але оновлюємо lastPosition, щоб наступна точка
-      // рахувалась від нового місця
+      // Фільтр GPS-стрибків: ігноруємо "швидкість" > 30 км/год
       if (d > 0 && speed <= 30) {
         totalDistance += d;
-        allPoints.push({ lat: latitude, lon: longitude, time: now });
+        allPoints.push({ lat: latitude, lon: longitude });
         lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
         return d;
       }
 
-      // Стрибок — оновлюємо lastPosition, дистанцію НЕ додаємо
+      // Стрибок — оновлюємо lastPosition, але НЕ додаємо відстань
       lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
       return 0;
     }
@@ -353,8 +349,6 @@
         (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
 
-          // Рахуємо дистанцію ЗАВЖДИ (навіть при поганій точності),
-          // але показуємо точність користувачу
           const added = addPoint(latitude, longitude, accuracy);
 
           if (accuracy > 100) {
@@ -386,7 +380,7 @@
         },
         {
           enableHighAccuracy: true,
-          maximumAge: 0,      // ← завжди свіжі дані
+          maximumAge: 0,
           timeout: 20000,
         }
       );
@@ -461,7 +455,7 @@
     });
 
     // ------------------------------------------------------------
-    //  ЗАКІНЧИТИ
+    //  ЗАКІНЧИТИ → відправити боту
     // ------------------------------------------------------------
     stopBtn.addEventListener("click", () => {
       if (!running) return;
@@ -485,6 +479,7 @@
       const endHHmm   = `${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}`;
       const durationFormatted = formatTime(durationMs);
 
+      // Показуємо результат на екрані
       resultEl.textContent =
         `🏁 Тренування завершено\n` +
         `👤 ${surname}\n` +
@@ -493,40 +488,56 @@
         `🕐 Закінчення: ${endHHmm}\n` +
         `⏱ Час тренування: ${durationFormatted}\n` +
         `📏 Дистанція: ${km.toFixed(2)} км\n` +
-        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год\n` +
-        `📍 GPS-точок: ${allPoints.length}\n\n` +
+        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год\n\n` +
         `✅ Дані надіслано тренеру.`;
       resultEl.classList.remove("hidden");
 
+      // Пакет даних для бота (БЕЗ збереження в історію)
       const payload = {
         action: "kros_result",
-        surname,
+        surname: surname,
         date: dateStr,
         startTime: startHHmm,
         endTime: endHHmm,
-        durationFormatted,
+        durationFormatted: durationFormatted,
         durationSec: Math.floor(durationMs / 1000),
         distanceKm: +km.toFixed(3),
         avgSpeedKmh: +avgSpeed.toFixed(2),
         startISO: startDate.toISOString(),
-        endISO: endDate.toISOString(),
-        pointsCount: allPoints.length,
+        endISO: endDate.toISOString()
       };
 
-      try {
-        const history = JSON.parse(localStorage.getItem("kros_history") || "[]");
-        history.push(payload);
-        localStorage.setItem("kros_history", JSON.stringify(history.slice(-50)));
-      } catch (e) {}
+      console.log("[KROS] Payload:", payload);
 
+      // ВІДПРАВКА БОТУ
       if (isTelegram && tg.sendData) {
         try {
-          tg.sendData(JSON.stringify(payload));
+          const jsonStr = JSON.stringify(payload);
+          console.log("[KROS] Розмір JSON:", jsonStr.length, "байт");
+
+          if (jsonStr.length > 4000) {
+            console.warn("[KROS] Занадто великий payload — спрощуємо");
+            const simplePayload = {
+              action: "kros_result",
+              surname: surname,
+              date: dateStr,
+              startTime: startHHmm,
+              endTime: endHHmm,
+              durationFormatted: durationFormatted,
+              distanceKm: +km.toFixed(3),
+              avgSpeedKmh: +avgSpeed.toFixed(2)
+            };
+            tg.sendData(JSON.stringify(simplePayload));
+          } else {
+            tg.sendData(jsonStr);
+          }
+          console.log("[KROS] ✅ sendData викликано");
         } catch (e) {
-          console.error("sendData error:", e);
+          console.error("[KROS] ❌ sendData error:", e);
           alert("Не вдалося надіслати дані тренеру. Спробуйте ще раз.");
         }
       } else {
+        console.warn("[KROS] Не в Telegram — sendData недоступний");
         resultEl.textContent += "\n\n⚠️ Відкрийте через Telegram-бота, щоб надіслати тренеру.";
       }
 
