@@ -193,7 +193,7 @@
 
   <script>
     // ============================================================
-    //  GPS Крос — логіка з інтеграцією Telegram WebApp
+    //  GPS Крос — логіка з надійною ініціалізацією Telegram WebApp
     // ============================================================
 
     const DEBUG = true;
@@ -214,36 +214,61 @@
     let lastPosition  = null;
     let intervalId    = null;
     let running       = false;
-    let allPoints     = [];
 
     // ------------------------------------------------------------
-    //  TELEGRAM WEBAPP
+    //  TELEGRAM WEBAPP — надійна ініціалізація
     // ------------------------------------------------------------
-    const tg = window.Telegram?.WebApp;
-    const isTelegram = !!(tg && tg.initDataUnsafe);
+    let tg = null;
+    let isTelegram = false;
 
-    if (tg) {
-      try {
-        tg.ready();
-        tg.expand();
-        tg.enableClosingConfirmation();
-      } catch (e) {
-        console.warn("Telegram WebApp init:", e);
+    function initTelegram() {
+      if (window.Telegram && window.Telegram.WebApp) {
+        tg = window.Telegram.WebApp;
+        isTelegram = true;
+
+        try {
+          tg.ready();
+          tg.expand();
+          if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
+          console.log("[TG] WebApp ініціалізовано");
+          console.log("[TG] initDataUnsafe:", tg.initDataUnsafe);
+          console.log("[TG] sendData доступний:", typeof tg.sendData === "function");
+        } catch (e) {
+          console.warn("[TG] init error:", e);
+        }
+
+        if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+          const u = tg.initDataUnsafe.user;
+          const autoName = [u.last_name, u.first_name].filter(Boolean).join(" ").trim();
+          if (autoName) {
+            surnameInput.value = autoName;
+            surnameInput.setAttribute("readonly", "readonly");
+            surnameInput.title = "Ім'я автоматично з Telegram";
+          }
+          footerText.textContent = "Результат автоматично надсилається тренеру";
+        } else {
+          surnameInput.value = localStorage.getItem("kros_surname") || "";
+          footerText.textContent = "⚠️ Відкрийте через Telegram-бота";
+        }
+        return true;
       }
+      return false;
     }
 
-    // Автозаповнення імені з Telegram
-    if (isTelegram && tg.initDataUnsafe.user) {
-      const u = tg.initDataUnsafe.user;
-      const autoName = [u.last_name, u.first_name].filter(Boolean).join(" ").trim();
-      if (autoName) {
-        surnameInput.value = autoName;
-        surnameInput.setAttribute("readonly", "readonly");
-        surnameInput.title = "Ім'я автоматично береться з Telegram";
-      }
-      footerText.textContent = "Результат автоматично надсилається тренеру";
-    } else {
-      surnameInput.value = localStorage.getItem("kros_surname") || "";
+    if (!initTelegram()) {
+      console.log("[TG] SDK ще не завантажено, чекаємо...");
+      let attempts = 0;
+      const tgWait = setInterval(() => {
+        attempts++;
+        if (initTelegram()) {
+          clearInterval(tgWait);
+        } else if (attempts >= 30) {
+          clearInterval(tgWait);
+          console.warn("[TG] SDK не завантажився за 3 секунди — працюємо як звичайна сторінка");
+          surnameInput.value = localStorage.getItem("kros_surname") || "";
+          footerText.textContent = "⚠️ Відкрийте через Telegram-бота";
+        }
+      }, 100);
     }
 
     surnameInput.addEventListener("change", () => {
@@ -288,15 +313,11 @@
       return map[err.code] || "невідома помилка";
     }
 
-    // ------------------------------------------------------------
-    //  ДОДАТИ ТОЧКУ ДО ТРЕКУ
-    // ------------------------------------------------------------
     function addPoint(latitude, longitude, accuracy) {
       const now = Date.now();
 
       if (!lastPosition) {
         lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
-        allPoints.push({ lat: latitude, lon: longitude });
         return 0;
       }
 
@@ -304,15 +325,12 @@
       const dt = (now - lastPosition.time) / 1000;
       const speed = dt > 0 ? (d / dt) * 3.6 : 0;
 
-      // Фільтр GPS-стрибків: ігноруємо "швидкість" > 30 км/год
       if (d > 0 && speed <= 30) {
         totalDistance += d;
-        allPoints.push({ lat: latitude, lon: longitude });
         lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
         return d;
       }
 
-      // Стрибок — оновлюємо lastPosition, але НЕ додаємо відстань
       lastPosition = { lat: latitude, lon: longitude, time: now, accuracy };
       return 0;
     }
@@ -348,24 +366,14 @@
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
-
           const added = addPoint(latitude, longitude, accuracy);
 
           if (accuracy > 100) {
-            setGpsStatus(
-              `📍 GPS: слабкий сигнал (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`,
-              "warn"
-            );
+            setGpsStatus(`📍 GPS: слабкий (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`, "warn");
           } else if (accuracy > 50) {
-            setGpsStatus(
-              `📍 GPS: середній сигнал (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`,
-              "warn"
-            );
+            setGpsStatus(`📍 GPS: середній (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`, "warn");
           } else {
-            setGpsStatus(
-              `📍 GPS: OK (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`,
-              "ok"
-            );
+            setGpsStatus(`📍 GPS: OK (±${Math.round(accuracy)} м) · ${(totalDistance/1000).toFixed(2)} км`, "ok");
           }
 
           if (DEBUG && added > 0) {
@@ -375,14 +383,10 @@
           updateUI();
         },
         (err) => {
-          console.warn("[GPS] watchPosition error:", err);
+          console.warn("[GPS] error:", err);
           setGpsStatus(`📍 GPS: ${geoErrorMessage(err)}`, "error");
         },
-        {
-          enableHighAccuracy: true,
-          maximumAge: 0,
-          timeout: 20000,
-        }
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
       );
     }
 
@@ -438,7 +442,6 @@
       startTime     = Date.now();
       totalDistance = 0;
       lastPosition  = null;
-      allPoints     = [];
       running       = true;
 
       startBtn.textContent = "▶ Почати";
@@ -479,7 +482,6 @@
       const endHHmm   = `${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}`;
       const durationFormatted = formatTime(durationMs);
 
-      // Показуємо результат на екрані
       resultEl.textContent =
         `🏁 Тренування завершено\n` +
         `👤 ${surname}\n` +
@@ -488,11 +490,9 @@
         `🕐 Закінчення: ${endHHmm}\n` +
         `⏱ Час тренування: ${durationFormatted}\n` +
         `📏 Дистанція: ${km.toFixed(2)} км\n` +
-        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год\n\n` +
-        `✅ Дані надіслано тренеру.`;
+        `⚡ Середня швидкість: ${avgSpeed.toFixed(2)} км/год`;
       resultEl.classList.remove("hidden");
 
-      // Пакет даних для бота (БЕЗ збереження в історію)
       const payload = {
         action: "kros_result",
         surname: surname,
@@ -502,43 +502,34 @@
         durationFormatted: durationFormatted,
         durationSec: Math.floor(durationMs / 1000),
         distanceKm: +km.toFixed(3),
-        avgSpeedKmh: +avgSpeed.toFixed(2),
-        startISO: startDate.toISOString(),
-        endISO: endDate.toISOString()
+        avgSpeedKmh: +avgSpeed.toFixed(2)
       };
 
+      console.log("[KROS] isTelegram:", isTelegram);
+      console.log("[KROS] tg:", tg);
+      console.log("[KROS] tg.sendData:", tg ? typeof tg.sendData : "немає");
       console.log("[KROS] Payload:", payload);
 
-      // ВІДПРАВКА БОТУ
-      if (isTelegram && tg.sendData) {
+      if (isTelegram && tg && typeof tg.sendData === "function") {
         try {
           const jsonStr = JSON.stringify(payload);
           console.log("[KROS] Розмір JSON:", jsonStr.length, "байт");
-
-          if (jsonStr.length > 4000) {
-            console.warn("[KROS] Занадто великий payload — спрощуємо");
-            const simplePayload = {
-              action: "kros_result",
-              surname: surname,
-              date: dateStr,
-              startTime: startHHmm,
-              endTime: endHHmm,
-              durationFormatted: durationFormatted,
-              distanceKm: +km.toFixed(3),
-              avgSpeedKmh: +avgSpeed.toFixed(2)
-            };
-            tg.sendData(JSON.stringify(simplePayload));
-          } else {
-            tg.sendData(jsonStr);
-          }
+          tg.sendData(jsonStr);
           console.log("[KROS] ✅ sendData викликано");
+          resultEl.textContent += "\n\n✅ Дані надіслано тренеру.";
         } catch (e) {
           console.error("[KROS] ❌ sendData error:", e);
-          alert("Не вдалося надіслати дані тренеру. Спробуйте ще раз.");
+          alert("Помилка відправки: " + e.message);
+          resultEl.textContent += "\n\n❌ Не вдалося надіслати дані.";
         }
       } else {
-        console.warn("[KROS] Не в Telegram — sendData недоступний");
-        resultEl.textContent += "\n\n⚠️ Відкрийте через Telegram-бота, щоб надіслати тренеру.";
+        console.error("[KROS] ❌ sendData НЕ викликано — не в Telegram WebApp");
+        alert(
+          "⚠️ Дані НЕ надіслано!\n\n" +
+          "Ви відкрили сторінку не через Telegram-бота.\n" +
+          "Відкрийте бота → 🏃 GPS КРОС → і повторіть."
+        );
+        resultEl.textContent += "\n\n⚠️ Дані НЕ надіслано — відкрийте через Telegram-бота.";
       }
 
       startBtn.disabled = false;
@@ -547,9 +538,6 @@
       setGpsStatus("📍 GPS: зупинено");
     });
 
-    // ------------------------------------------------------------
-    //  Перевірка HTTPS
-    // ------------------------------------------------------------
     window.addEventListener("load", () => {
       if (!window.isSecureContext) {
         setGpsStatus("📍 GPS: потрібен HTTPS", "error");
